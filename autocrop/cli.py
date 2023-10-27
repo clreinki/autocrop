@@ -2,7 +2,6 @@ import argparse
 import os
 import shutil
 import sys
-from typing import Optional
 
 from PIL import Image
 
@@ -10,8 +9,12 @@ from .__version__ import __version__
 from .autocrop import Cropper, ImageReadError
 from .constants import (
     QUESTION_OVERWRITE,
-    INPUT_FILETYPES,
+    CV2_FILETYPES,
+    PILLOW_FILETYPES,
 )
+
+COMBINED_FILETYPES = CV2_FILETYPES + PILLOW_FILETYPES
+INPUT_FILETYPES = COMBINED_FILETYPES + [s.upper() for s in COMBINED_FILETYPES]
 
 
 def output(input_filename, output_filename, image):
@@ -37,15 +40,8 @@ def reject(input_filename, reject_filename):
 
 
 def main(
-    input_d: str,
-    output_d: str,
-    reject_d: str,
-    extension: Optional[str] = None,
-    fheight: int = 500,
-    fwidth: int = 500,
-    facePercent: int = 50,
-    resize: bool = True,
-) -> None:
+    input_d, output_d, reject_d, extension=None, fheight=500, fwidth=500, facePercent=50
+):
     """
     Crops folder of images to the desired height and width if a
     face is found.
@@ -70,13 +66,15 @@ def main(
         * Percentage of face from height.
     - `extension` : `str`
         * Image extension to save at output.
-    - `resize`: `bool`, default=`True`
-        * If `False`, don't resize the image, but use the original size.
 
     Side Effects:
     -------------
 
     - Creates image files in output directory.
+
+    Type Signature:
+    ---------------
+    `str, str, (int), (int) -> None`
     """
     reject_count = 0
     output_count = 0
@@ -97,9 +95,7 @@ def main(
     assert input_count > 0
 
     # Main loop
-    cropper = Cropper(
-        width=fwidth, height=fheight, face_percent=facePercent, resize=resize
-    )
+    cropper = Cropper(width=fwidth, height=fheight, face_percent=facePercent)
     for input_filename in input_files:
         basename = os.path.basename(input_filename)
         if extension:
@@ -123,9 +119,14 @@ def main(
             print("No face detected: {}".format(reject_filename))
             reject_count += 1
         else:
-            output(input_filename, output_filename, image)
-            print("Face detected:    {}".format(output_filename))
-            output_count += 1
+            try:
+                output(input_filename, output_filename, image)
+                print("Face detected:    {}".format(output_filename))
+                output_count += 1
+            except:
+                print("Invalid cropped image")
+                reject_count += 1
+                continue
 
     # Stop and print status
 
@@ -208,7 +209,7 @@ def chk_extension(extension):
     extension = str(extension).lower()
     if not extension.startswith("."):
         extension = f".{extension}"
-    if extension in INPUT_FILETYPES:
+    if extension in COMBINED_FILETYPES:
         return extension.lower().replace(".", "")
     else:
         raise argparse.ArgumentTypeError(error)
@@ -234,28 +235,9 @@ def parse_args(args):
         "height": "Height of cropped files in px. Default=500",
         "y": "Bypass any confirmation prompts",
         "facePercent": "Percentage of face to image height",
-        "no_resize": """Do not resize images to the specified width and height,
-                      but instead use the original image's pixels.""",
     }
 
     parser = argparse.ArgumentParser(description=help_d["desc"])
-    parser.add_argument(
-        "-v",
-        "--version",
-        action="version",
-        version="%(prog)s version {}".format(__version__),
-    )
-    parser.add_argument(
-        "--no-confirm",
-        "--skip-prompt",
-        action="store_true", help=help_d["y"]
-    )
-    parser.add_argument(
-        "-n",
-        "--no-resize",
-        action="store_true",
-        help=help_d["no_resize"],
-    )
     parser.add_argument(
         "-i", "--input", default=".", type=input_path, help=help_d["input"]
     )
@@ -273,6 +255,13 @@ def parse_args(args):
     )
     parser.add_argument("-w", "--width", type=size, default=500, help=help_d["width"])
     parser.add_argument("-H", "--height", type=size, default=500, help=help_d["height"])
+    parser.add_argument(
+        "-v",
+        "--version",
+        action="version",
+        version="%(prog)s version {}".format(__version__),
+    )
+    parser.add_argument("--no-confirm", action="store_true", help=help_d["y"])
     parser.add_argument(
         "--facePercent", type=size, default=50, help=help_d["facePercent"]
     )
@@ -298,7 +287,6 @@ def command_line_interface():
         args.output = None
     print("Processing images in folder:", args.input)
 
-    resize = not args.no_resize
     main(
         args.input,
         args.output,
@@ -307,5 +295,4 @@ def command_line_interface():
         args.height,
         args.width,
         args.facePercent,
-        resize,
     )

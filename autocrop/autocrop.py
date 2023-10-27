@@ -1,6 +1,8 @@
 import itertools
 
 import cv2
+from matplotlib import pyplot
+from mtcnn.mtcnn import MTCNN
 import numpy as np
 import os
 import sys
@@ -10,8 +12,13 @@ from .constants import (
     MINFACE,
     GAMMA_THRES,
     GAMMA,
+    CV2_FILETYPES,
+    PILLOW_FILETYPES,
     CASCFILE,
 )
+
+COMBINED_FILETYPES = CV2_FILETYPES + PILLOW_FILETYPES
+INPUT_FILETYPES = COMBINED_FILETYPES + [s.upper() for s in COMBINED_FILETYPES]
 
 
 class ImageReadError(BaseException):
@@ -47,13 +54,10 @@ def distance(pt1, pt2):
 
 def bgr_to_rbg(img):
     """Given a BGR (cv2) numpy array, returns a RBG (standard) array."""
-    # Don't do anything for grayscale images
-    if img.ndim == 2:
+    dimensions = len(img.shape)
+    if dimensions == 2:
         return img
-
-    # Flip the channels. Use explicit indexing in case RGBA is used.
-    img[:, :, [0, 1, 2]] = img[:, :, [2, 1, 0]]
-    return img
+    return img[..., ::-1]
 
 
 def gamma(img, correction):
@@ -82,8 +86,32 @@ def check_positive_scalar(num):
 
 def open_file(input_filename):
     """Given a filename, returns a numpy array"""
-    with Image.open(input_filename) as img_orig:
-        return np.array(img_orig)
+    extension = os.path.splitext(input_filename)[1].lower()
+
+    if extension in CV2_FILETYPES:
+        # Try with cv2
+        return cv2.imread(input_filename)
+    if extension in PILLOW_FILETYPES:
+        # Try with PIL
+        with Image.open(input_filename) as img_orig:
+            return np.asarray(img_orig)
+    return None
+
+
+def crop_center(image, width, height):
+    # Get the dimensions of the original image
+    original_height, original_width, _ = image.shape
+
+    # Calculate the coordinates for cropping
+    start_x = max(0, (original_width - width) // 2)
+    start_y = max(0, (original_height - height) // 2)
+    end_x = min(original_width, start_x + width)
+    end_y = min(original_height, start_y + height)
+
+    # Crop the image
+    cropped_image = image[start_y:end_y, start_x:end_x]
+
+    return cropped_image
 
 
 class Cropper:
@@ -110,9 +138,6 @@ class Cropper:
         - Cropped faces are often underexposed when taken
         out of their context. If under a threshold, sets the
         gamma to 0.9.
-    * `resize`: `bool`, default=`True`
-        - Resizes the image to the specified width and height,
-        otherwise, returns the original image pixels.
     """
 
     def __init__(
@@ -121,14 +146,12 @@ class Cropper:
         height=500,
         face_percent=50,
         padding=None,
-        fix_gamma=True,
-        resize=True,
+        fix_gamma=False,
     ):
         self.height = check_positive_scalar(height)
         self.width = check_positive_scalar(width)
         self.aspect_ratio = width / height
         self.gamma = fix_gamma
-        self.resize = resize
 
         # Face percent
         if face_percent > 100 or face_percent < 1:
@@ -172,44 +195,60 @@ class Cropper:
             img_height, img_width = image.shape[:2]
         except AttributeError:
             raise ImageReadError
-        minface = int(np.sqrt(img_height**2 + img_width**2) / MINFACE)
+        minface = int(np.sqrt(img_height ** 2 + img_width ** 2) / MINFACE)
 
         # Create the haar cascade
-        face_cascade = cv2.CascadeClassifier(self.casc_path)
+        ##face_cascade = cv2.CascadeClassifier(self.casc_path)
 
         # ====== Detect faces in the image ======
-        faces = face_cascade.detectMultiScale(
-            gray,
-            scaleFactor=1.1,
-            minNeighbors=5,
-            minSize=(minface, minface),
-            flags=cv2.CASCADE_FIND_BIGGEST_OBJECT | cv2.CASCADE_DO_ROUGH_SEARCH,
-        )
+        ##faces = face_cascade.detectMultiScale(
+        #    gray,
+        #    scaleFactor=1.1,
+        #    minNeighbors=5,
+        #    minSize=(minface, minface),
+        #    flags=cv2.CASCADE_FIND_BIGGEST_OBJECT | cv2.CASCADE_DO_ROUGH_SEARCH,
+        #)
+
+        # If picture is too small, resize in place
+        if img_width < self.width:
+            image = cv2.resize(
+                image, (self.width, self.height), interpolation=cv2.INTER_AREA
+            )
+            print("Image too small, resizing in place")
+            return bgr_to_rbg(image)
+
+        detector = MTCNN()
+        faces = detector.detect_faces(image)
 
         # Handle no faces
         if len(faces) == 0:
-            return None
+            image = crop_center(image, self.width, self.height)
+            return bgr_to_rbg(image)
 
         # Make padding from biggest face found
-        x, y, w, h = faces[-1]
-        pos = self._crop_positions(
-            img_height,
-            img_width,
-            x,
-            y,
-            w,
-            h,
-        )
+        print(faces)
+        x1, y1, width, height = faces[-1]['box']
+        x2, y2 = x1 + width, y1 + height
+        xoff = round((self.width - width)/2)
+        yoff = round((self.height - height)/2)
+        y1 = y1 - yoff
+        y2 = y2 + yoff
+        if not y2 - y1 == self.height:
+            y2 = y2 + 1
+        x1 = x1 - xoff
+        x2 = x2 + xoff
+        if not x2 - x1 == self.width:
+            x2 = x2 + 1
 
         # ====== Actual cropping ======
-        image = image[pos[0] : pos[1], pos[2] : pos[3]]
+        image = image[y1:y2, x1:x2]
 
         # Resize
-        if self.resize:
-            with Image.fromarray(image) as img:
-                image = np.array(img.resize((self.width, self.height)))
+        #image = cv2.resize(
+        #    image, (self.width, self.height), interpolation=cv2.INTER_AREA
+        #)
 
-        # Underexposition fix
+        # Underexposition
         if self.gamma:
             image = check_underexposed(image, gray)
         return bgr_to_rbg(image)
